@@ -11,19 +11,20 @@ gentooci=${GENTOO_CI_GIT}
 pull=${PULL_REQUEST_DIR}
 
 if [[ -s ${pull}/current-pr ]]; then
-	iid=$(<"${pull}"/current-pr)
+	pr=$(<"${pull}"/current-pr)
+	prid="${pr#*/}"
 	cd -- "${sync}"
-	hash=$(git rev-parse "refs/pull/${iid}")
+	hash=$(git rev-parse "refs/pull/${pr}")
 	"${SCRIPT_DIR}"/pull-request/set-pull-request-status.py "${hash}" error \
 		"QA checks crashed. Please rebase and check profile changes for syntax errors."
 	sendmail "${CRONJOB_ADMIN_MAIL}" <<-EOF
-		Subject: Pull request crash: ${iid}
+		Subject: Pull request crash: ${prid}
 		To: <${CRONJOB_ADMIN_MAIL}>
 		Content-Type: text/plain; charset=utf8
 
-		It seems that pull request check for ${iid} crashed [1].
+		It seems that pull request check for ${prid} crashed [1].
 
-		[1]:${PULL_REQUEST_REPO}/pull/${iid}
+		[1]:${PULL_REQUEST_REPO}/pull/${prid}
 	EOF
 	rm -f -- "${pull}"/current-pr
 fi
@@ -53,14 +54,22 @@ git pull
 
 # check if we have anything to process
 mkdir -p -- "${pull}"
-prid=$( "${SCRIPT_DIR}"/pull-request/scan-pull-requests.py )
+pr=$( "${SCRIPT_DIR}"/pull-request/scan-pull-requests.py )
+forge="${pr%/*}"
+prid="${pr#*/}"
 
-if [[ -n ${prid} ]]; then
-	echo "${prid}" > "${pull}"/current-pr
+if [[ -n ${pr} ]]; then
+	echo "${pr}" > "${pull}"/current-pr
 
 	cd -- "${sync}"
-	ref=refs/pull/${prid}
-	git fetch -f origin "refs/pull/${prid}/head:${ref}"
+	ref=refs/pull/${pr}
+
+	remote=""
+	case ${forge} in
+		github) remote="origin" ;;
+		*) echo "unknown forge ${forge}"; exit 1 ;;
+	esac
+	git fetch -f "${remote}" "refs/pull/${prid}/head:${ref}"
 
 	hash=$(git rev-parse "${ref}")
 
@@ -71,14 +80,14 @@ if [[ -n ${prid} ]]; then
 	cd -- tmp
 	git fetch "${sync}" "${ref}:${ref}"
 	# start on top of last common commit, like fast-forward would do
-	git branch "pull-${prid}" "$(git merge-base "${ref}" master)"
-	git checkout -q "pull-${prid}"
+	git branch "pull-${forge}-${prid}" "$(git merge-base "${ref}" master)"
+	git checkout -q "pull-${forge}-${prid}"
 	# copy existing md5-cache (TODO: try to find previous merge commit)
 	rsync -rlpt --delete "${mirror}"/metadata/{dtd,glsa,md5-cache,news,xml-schema} metadata
 
 	# merge the PR on top of cache
 	git tag pre-merge
-	git merge --quiet -m "Merge PR ${prid}" "${ref}"
+	git merge --quiet -m "Merge PR ${pr}" "${ref}"
 
 	# update cache
 	CONFIG_DIR=${pull}/etc/portage
@@ -88,7 +97,7 @@ if [[ -n ${prid} ]]; then
 	cd ..
 	git clone -s "${gentooci}" gentoo-ci
 	cd -- gentoo-ci
-	git checkout -b "pull-${prid}"
+	git checkout -b "pull-${forge}-${prid}"
 	( cd -- "${pull}"/tmp &&
 		time HOME=${pull}/gentoo-ci \
 		timeout -k 30s "${CI_TIMEOUT}" pkgcheck --config "${CONFIG_DIR}" \
@@ -101,12 +110,12 @@ if [[ -n ${prid} ]]; then
 		-w -e -o borked.list *.xml
 
 	git add -- *.xml
-	git diff --cached --quiet --exit-code || git commit -a -m "PR ${prid} @ $(date -u --date="@${ts}" "+%Y-%m-%d %H:%M:%S UTC")"
+	git diff --cached --quiet --exit-code || git commit -a -m "PR ${pr} @ $(date -u --date="@${ts}" "+%Y-%m-%d %H:%M:%S UTC")"
 	pr_hash=$(git rev-parse --short HEAD)
-	git push -f origin "pull-${prid}"
+	git push -f origin "pull-${forge}-${prid}"
 
 	cd -- "${gentooci}"
-	git push -f origin "pull-${prid}"
+	git push -f origin "pull-${forge}-${prid}"
 	curl "https://qa-reports-cdn-origin.gentoo.org/cgi-bin/trigger-pull.cgi?gentoo-ci" || :
 
 	# if we have any breakages...
